@@ -15,7 +15,6 @@ type Course = {
   status: TermStatus;
   flag?: CourseFlag;
 };
-
 type Term = {
   name: string; // "Fall 2024"
   totalCredits: number;
