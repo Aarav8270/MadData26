@@ -25,9 +25,8 @@ for filepath in csv_files:
     df['groupID'] = df['Group ID'].apply(lambda x: int(x))
     df["majorName"] = major_name
     df["creditsNeeded"] = df["Credits Required"].apply(lambda x: str(x) if "C" in x else int(x))
-
     
-
+    
 
 
     print(df.keys())

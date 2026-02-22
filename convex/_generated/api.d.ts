@@ -8,6 +8,8 @@
  * @module
  */
 
+import type * as majors from "../majors.js";
+import type * as progress from "../progress.js";
 import type * as tasks from "../tasks.js";
 
 import type {
@@ -17,6 +19,8 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  majors: typeof majors;
+  progress: typeof progress;
   tasks: typeof tasks;
 }>;
 

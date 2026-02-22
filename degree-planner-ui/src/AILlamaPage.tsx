@@ -1,38 +1,50 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from "convex/react";
+import { api } from "../../convex/_generated/api";
+
+
 
 export default function AILlamaPage() {
   const [prompt, setPrompt] = useState("");
   const [response, setResponse] = useState("");
   const [loading, setLoading] = useState(false);
-  
   const navigate = useNavigate();
+
+  // 1. Fetch relevant context from your Convex backend
+  // Adjust these queries based on your actual Convex schema/API
+  //const userProgress = useQuery(api.tasks.getUserProgress); 
+  const majorReqs = useQuery(api.tasks.getMajorReqs);
+  console.log(majorReqs);
+  console.log("by now");
+  
+  // Example placeholder for context:
+  const studentContext = "Student is a Computer Science major. They have taken CS 200 and CS 300. They need to fulfill their science requirements.";
 
   const handleAskAI = async () => {
     setLoading(true);
     try {
-      // Replace this URL with the local API port your Llama model is being served on
-      // Example: http://localhost:5000/api/ask
       const res = await fetch("http://localhost:5000/api/ask", {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        // Send the prompt to the backend
-        body: JSON.stringify({ prompt })
+        // 2. Send both the user's question AND the Convex context to Python
+        body: JSON.stringify({ 
+            prompt: prompt,
+            context: studentContext // Pass the data from Convex here
+        })
       });
       
       const data = await res.json();
-      // Adjust "data.answer" based on how your Python backend returns the output
       setResponse(data.answer); 
     } catch (err) {
       console.error(err);
-      setResponse("Error connecting to the local Llama model. Make sure the local server in the 'ai' folder is running.");
+      setResponse("Error connecting to the local Llama model.");
     } finally {
       setLoading(false);
     }
   };
-
   return (
     <div className="p-8 max-w-4xl mx-auto font-sans">
       <button 

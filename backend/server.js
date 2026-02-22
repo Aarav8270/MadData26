@@ -3,7 +3,7 @@ import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import { evaluateMajorProgress, listMajors, loadRequirements } from "./majorProgress.js";
-
+import { generateAdvisorOverview } from "./aiAdvisor.js";
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
@@ -38,5 +38,34 @@ app.post("/api/major-progress", (req, res) => {
     return res.status(500).json({ error: String(error) });
   }
 });
+app.post("/api/ai-advice", async (req, res) => {
+  try {
+    const { major, degreeType, studentCourses } = req.body ?? {};
+    if (!major || !Array.isArray(studentCourses)) {
+      return res.status(400).json({ error: "major and studentCourses[] are required" });
+    }
 
+    const requirements = loadRequirements(requirementsPath);
+    const majorProgress = evaluateMajorProgress(requirements, major, degreeType, studentCourses);
+    const advice = await generateAdvisorOverview({
+      requirements,
+      major,
+      degreeType: degreeType ?? "BA",
+      majorProgress,
+      studentCourses,
+    });
+
+    return res.json({
+      major: majorProgress.major,
+      degreeType: majorProgress.degreeType,
+      majorCompletionPercent: majorProgress.majorCompletionPercent,
+      evaluatedGroups: majorProgress.evaluatedGroups,
+      suggestions: advice.suggestions,
+      source: advice.source,
+      advice: advice.advice,
+    });
+  } catch (error) {
+    return res.status(500).json({ error: String(error) });
+  }
+});
 app.listen(8000, () => console.log("Backend running on http://localhost:8000"));

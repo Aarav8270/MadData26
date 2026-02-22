@@ -4,13 +4,12 @@ import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
 import Papa from "papaparse";
 import { useNavigate } from "react-router-dom";
 
-// (Optional) Convex imports — you can keep/remove if unused.
-// import { useQuery } from "convex/react";
-// import { api } from "../../convex/_generated/api";
+import { useQuery } from "convex/react";
+import { api } from "../../convex/_generated/api";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type PlannerMode = "dars" | "degree" | "qualcomm";
+type PlannerMode = "dars" | "degree";
 
 type TermStatus = "completed" | "in_progress" | "cart";
 type CourseFlag = "in_progress" | "waitlisted" | "not_offered" | "no_longer_offered";
@@ -48,24 +47,7 @@ type ParsedCourse = {
   grade: string; // "A", "BC", "INP", ...
   title: string;
 };
-type MajorProgressResult = {
-  major: string;
-  degreeType: string;
-  majorCompletionPercent: number;
-  evaluatedGroups: number;
-};
-type RequirementGroup = {
-  groupId: string;
-  ruleType: "choose_n_courses" | "min_credits" | "manual_review";
-  requiredCount: number | null;
-  requiredCredits: number | null;
-  courses: string[];
-};
 
-type MajorRequirement = {
-  major: string;
-  requirementGroups: RequirementGroup[];
-};
 type CatalogCourse = {
   courseId: string; // "ACCT I S 100"
   title: string;
@@ -75,6 +57,14 @@ type CatalogCourse = {
 };
 
 type CsvRow = Record<string, string | number | null | undefined>;
+
+type TopMajor = {
+  major: string;
+  degreeType: string;
+  percent: number;
+  satisfiedGroups: number;
+  totalGroups: number;
+};
 
 function classNames(...xs: Array<string | false | undefined | null>) {
   return xs.filter(Boolean).join(" ");
@@ -115,7 +105,28 @@ function Icon({
       return null;
   }
 }
+function dedupeParsedCoursesStrong(arr: ParsedCourse[]): ParsedCourse[] {
+  const seen = new Set<string>();
+  const out: ParsedCourse[] = [];
 
+  for (const c of arr) {
+    // IMPORTANT: ignore title in key — title often differs slightly across repeats
+    // Also normalize subject spacing
+    const subject = c.subject.trim().replace(/\s+/g, " ");
+    const key = `${c.termCode}|${c.year}|${subject}|${c.number}|${c.credits}|${c.grade}`;
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push({
+        ...c,
+        subject,
+        title: c.title.trim().replace(/\s+/g, " "),
+      });
+    }
+  }
+
+  return out;
+}
 function Badge({ children }: { children: React.ReactNode }) {
   return (
     <span className="inline-flex items-center rounded-full border bg-white px-2 py-0.5 text-xs font-medium text-gray-700">
@@ -374,45 +385,65 @@ function parseCourseLine(line: string): ParsedCourse | null {
 
 function extractCoursesFromDarsText(text: string): ParsedCourse[] {
   const normalized = text.replace(/\u00A0/g, " ");
+
+  // Find the course list anchor
   const anchorRe = /total\s+credits\s+for\s+the\s+degree/i;
+  const anchorMatch = normalized.match(anchorRe);
+  const startIdx = anchorMatch?.index ?? 0;
 
-  const m = normalized.match(anchorRe);
-  const tail = m ? normalized.slice(m.index ?? 0) : normalized;
+  // Slice from anchor onward
+  const tail = normalized.slice(startIdx);
 
+  // Split into normalized lines
   const lines = tail
     .split(/\r?\n/)
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
+  // Course lines always start with FA/SP/SU + 2-digit year
   const courseLineRe = /^(FA|SP|SU)\s*\d{2}\b/i;
 
-  const candidates = lines.filter((l) => courseLineRe.test(l));
-  const parsed = candidates.map(parseCourseLine).filter((x): x is ParsedCourse => Boolean(x));
+  // Many DARS PDFs repeat this list in other requirement sections.
+  // We stop parsing when we hit a "new section header" after we've started collecting courses.
+  const stopRe =
+    /(degree\s+requirements|general\s+education|major\s+requirements|breadth|communication|ethnic\s+studies|quantitative\s+reasoning|requirements\s+not\s+met|requirements\s+met|summary)/i;
 
+  const parsed: ParsedCourse[] = [];
+  let started = false;
+
+  for (const line of lines) {
+    if (courseLineRe.test(line)) {
+      started = true;
+      const pc = parseCourseLine(line);
+      if (pc) parsed.push(pc);
+      continue;
+    }
+
+    // Once we've started, stop when we hit a likely new section
+    if (started && stopRe.test(line)) {
+      break;
+    }
+
+    // Also stop if we hit a long run of non-course lines (PDF noise)
+    // Optional: you can add a counter here, but stopRe usually works.
+  }
+
+  // If we somehow got nothing, fallback to scanning the whole doc but still dedupe
   if (parsed.length === 0) {
-    const allCandidates = normalized
+    const allLines = normalized
       .split(/\r?\n/)
       .map((l) => l.replace(/\s+/g, " ").trim())
-      .filter((l) => courseLineRe.test(l));
+      .filter(Boolean);
 
-    const parsedAll = allCandidates.map(parseCourseLine).filter((x): x is ParsedCourse => Boolean(x));
-    return dedupeParsed(parsedAll);
+    const allParsed = allLines
+      .filter((l) => courseLineRe.test(l))
+      .map(parseCourseLine)
+      .filter((x): x is ParsedCourse => Boolean(x));
+
+    return dedupeParsedCoursesStrong(allParsed);
   }
 
-  return dedupeParsed(parsed);
-}
-
-function dedupeParsed(arr: ParsedCourse[]): ParsedCourse[] {
-  const seen = new Set<string>();
-  const out: ParsedCourse[] = [];
-  for (const c of arr) {
-    const key = `${c.termCode}${c.year}|${c.subject}|${c.number}|${c.credits}|${c.grade}|${c.title}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(c);
-    }
-  }
-  return out;
+  return dedupeParsedCoursesStrong(parsed);
 }
 
 function academicYearStart(termCode: "FA" | "SP" | "SU", year: number) {
@@ -486,134 +517,6 @@ function splitCourseId(courseId: string): { subject: string; number: string } {
   return { subject: courseId.trim(), number: "" };
 }
 
-function backendCandidates(): string[] {
-  const envBase = (import.meta as any)?.env?.VITE_BACKEND_URL as string | undefined;
-  const vals = [envBase, "", "http://localhost:8000"].filter((v): v is string => Boolean(v));
-  return Array.from(new Set(vals));
-}
-
-async function fetchJsonFromCandidates(path: string): Promise<any> {
-  let lastError: unknown = null;
-  for (const base of backendCandidates()) {
-    const url = `${base}${path}`;
-    try {
-      const r = await fetch(url);
-      if (!r.ok) {
-        lastError = new Error(`${url} -> ${r.status}`);
-        continue;
-      }
-      return await r.json();
-    } catch (e) {
-      lastError = e;
-    }
-  }
-  throw lastError ?? new Error(`Failed to fetch ${path}`);
-}
-function canon(value = "") {
-  return String(value).trim().toUpperCase().replace(/\s+/g, " ");
-}
-
-function optionParts(option: string) {
-  return String(option)
-    .split(/\s*&\s*/)
-    .map((v) => canon(v))
-    .filter(Boolean);
-}
-
-function evaluateLocalMajorProgress(
-  requirements: MajorRequirement[],
-  major: string,
-  degreeType: string,
-  courses: ParsedCourse[]
-): MajorProgressResult | null {
-  const majorObj = requirements.find((m) => canon(m.major) === canon(major));
-  if (!majorObj) return null;
-
-  const completed = courses.filter((c) => !["INP", "IP", "W", "UW"].includes(c.grade.toUpperCase()));
-  const remaining = new Set(completed.map((c) => canon(`${c.subject} ${c.number}`)));
-  const creditsMap = new Map(completed.map((c) => [canon(`${c.subject} ${c.number}`), c.credits]));
-
-  const ratios: number[] = [];
-
-  for (const group of majorObj.requirementGroups ?? []) {
-    if (group.ruleType === "choose_n_courses") {
-      const required = Number(group.requiredCount ?? 0);
-      if (required <= 0) {
-        ratios.push(0);
-        continue;
-      }
-
-      const candidates = (group.courses ?? []).map((opt) => {
-        const parts = optionParts(opt);
-        const matched = parts.filter((p) => remaining.has(p));
-        const score = parts.length ? matched.length / parts.length : 0;
-        return { score, matched, full: parts.length > 0 && matched.length === parts.length };
-      });
-
-      candidates.sort((a, b) => Number(b.full) - Number(a.full) || b.score - a.score);
-      const picked = candidates.slice(0, required);
-      const total = picked.reduce((sum, p) => sum + p.score, 0);
-      picked.forEach((p) => p.matched.forEach((m) => remaining.delete(m)));
-      ratios.push(Math.min(total / required, 1));
-      continue;
-    }
-
-    if (group.ruleType === "min_credits") {
-      const required = Number(group.requiredCredits ?? 0);
-      if (required <= 0) {
-        ratios.push(0);
-        continue;
-      }
-
-      const matched: Array<{ id: string; credits: number }> = [];
-      for (const opt of group.courses ?? []) {
-        const cid = canon(opt);
-        if (remaining.has(cid)) matched.push({ id: cid, credits: Number(creditsMap.get(cid) ?? 0) });
-      }
-
-      matched.sort((a, b) => b.credits - a.credits);
-      let earned = 0;
-      for (const item of matched) {
-        remaining.delete(item.id);
-        earned += item.credits;
-        if (earned >= required) break;
-      }
-
-      ratios.push(Math.min(earned / required, 1));
-      continue;
-    }
-
-    ratios.push(0);
-  }
-
-  return {
-    major: majorObj.major,
-    degreeType,
-    majorCompletionPercent: Number(((ratios.reduce((a, b) => a + b, 0) / Math.max(ratios.length, 1)) * 100).toFixed(2)),
-    evaluatedGroups: majorObj.requirementGroups?.length ?? 0,
-  };
-}
-
-function detectMajorFromDarsText(text: string, majors: string[]): string | null {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const candidates: string[] = [];
-
-  for (const line of lines) {
-    const m = line.match(/(?:major|program|plan)\s*[:\-]\s*(.+)$/i);
-    if (m?.[1]) candidates.push(m[1]);
-  }
-
-  const normalizedMajors = majors.map((m) => ({ raw: m, key: canon(m) }));
-  for (const candidate of candidates) {
-    const key = canon(candidate);
-    const exact = normalizedMajors.find((m) => m.key === key);
-    if (exact) return exact.raw;
-    const fuzzy = normalizedMajors.find((m) => key.includes(m.key) || m.key.includes(key));
-    if (fuzzy) return fuzzy.raw;
-  }
-
-  return null;
-}
 // -------- Manual planner helpers --------
 function makeEmptyTerm(name: string): Term {
   return {
@@ -643,11 +546,28 @@ function createEmptyFourYears(startYear: number): PlannerYear[] {
   });
 }
 
+function flattenStudentCourses(years: PlannerYear[]) {
+  const out: Array<{ courseId: string; credits: number; status: "completed" | "in_progress" | "planned" }> = [];
+  for (const y of years) {
+    for (const t of y.terms) {
+      for (const c of t.courses) {
+        out.push({
+          courseId: c.id,
+          credits: c.credits,
+          status: c.status === "cart" ? "planned" : c.status,
+        });
+      }
+    }
+  }
+  return out;
+}
+
 export default function DegreePlannerFrontend() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [activePage, setActivePage] = useState<PlannerMode>("dars");
+  const [degreeFilter, setDegreeFilter] = useState<"BA" | "BS">("BS");
 
   const [showGrades, setShowGrades] = useState(true);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -655,15 +575,7 @@ export default function DegreePlannerFrontend() {
 
   const [plannerYears, setPlannerYears] = useState<PlannerYear[]>([]);
   const [openMap, setOpenMap] = useState<Record<string, boolean>>({});
-  const [parsedCoursesForProgress, setParsedCoursesForProgress] = useState<ParsedCourse[]>([]);
-  const [majorOptions, setMajorOptions] = useState<string[]>([]);
-  const [majorRequirements, setMajorRequirements] = useState<MajorRequirement[]>([]);
-  const [majorOptionsError, setMajorOptionsError] = useState<string>("");
-  const [selectedMajor, setSelectedMajor] = useState<string>("");
-  const [selectedDegreeType, setSelectedDegreeType] = useState<string>("BA");
-  const [majorProgress, setMajorProgress] = useState<MajorProgressResult | null>(null);
-  const [progressLoading, setProgressLoading] = useState(false);
-  const [progressError, setProgressError] = useState<string>("");
+
   // Catalog state
   const [catalog, setCatalog] = useState<CatalogCourse[]>([]);
   const [subjects, setSubjects] = useState<string[]>([]);
@@ -675,7 +587,20 @@ export default function DegreePlannerFrontend() {
   const [drawerQuery, setDrawerQuery] = useState<string>("");
   const [drawerResults, setDrawerResults] = useState<CatalogCourse[]>([]);
 
-  // Init manual degree planner when switching to Degree Planner tab
+  // Convex majors list (optional; useful as “loaded” signal)
+  const majorsFromConvex = useQuery(api.majors.list, {});
+
+  // Convex: Top 5 majors
+  const studentCoursesForProgress = useMemo(() => flattenStudentCourses(plannerYears), [plannerYears]);
+
+  const topMajors = useQuery(api.progress.topMajors, {
+    studentCourses: studentCoursesForProgress,
+    topN: 10,
+    includePlanned: activePage === "degree",
+    degreeType: degreeFilter,
+  }) as TopMajor[] | undefined;
+
+  // Init manual planner when switching to Degree Planner
   React.useEffect(() => {
     if (activePage !== "degree") return;
 
@@ -691,7 +616,7 @@ export default function DegreePlannerFrontend() {
     setIsParsed(true);
   }, [activePage]);
 
-  // Load catalog once
+  // Load course catalog once
   React.useEffect(() => {
     fetch("/uwmadison_courses.csv")
       .then((r) => r.text())
@@ -703,8 +628,7 @@ export default function DegreePlannerFrontend() {
           .map((row: CsvRow): CatalogCourse | null => {
             const courseId =
               row.courseId ?? row.course_id ?? row["course id"] ?? row["Course ID"] ?? row["courseId"] ?? "";
-            const title =
-              row.title ?? row.course_title ?? row["course title"] ?? row["Title"] ?? "";
+            const title = row.title ?? row.course_title ?? row["course title"] ?? row["Title"] ?? "";
 
             const creditsRaw =
               row.credit ??
@@ -737,51 +661,6 @@ export default function DegreePlannerFrontend() {
       .catch((e) => console.error("Failed to load uwmadison_courses.csv", e));
   }, []);
 
-  React.useEffect(() => {
-    async function loadMajors() {
-      setMajorOptionsError("");
-
-      const tryApi = async (): Promise<string[]> => {
-        const payload = await fetchJsonFromCandidates("/api/majors");
-        return Array.isArray(payload?.majors) ? payload.majors : [];
-      };
-
-      const tryStatic = async (): Promise<string[]> => {
-        const payload = await fetchJsonFromCandidates("/data/normalized/MajorSpecificRequirements.JSON");
-        if (!Array.isArray(payload)) return [];
-        const typed = payload.filter((m): m is MajorRequirement => m && typeof m.major === "string" && Array.isArray(m.requirementGroups));
-        setMajorRequirements(typed);
-        return typed
-          .map((m) => m.major)
-          .filter(Boolean)
-          .sort((a, b) => a.localeCompare(b));
-      };
-
-      try {
-        let majors = await tryApi();
-        if (majors.length === 0) {
-          majors = await tryStatic();
-        }
-
-        setMajorOptions(majors);
-        if (majors.length > 0) {
-          setSelectedMajor((prev) => prev || majors[0]);
-          if (majorRequirements.length === 0) {
-            await tryStatic();
-          }
-        } else {
-          setMajorOptionsError("No major options were found.");
-        }
-      } catch (e) {
-        console.error("Failed to load majors", e);
-        setMajorOptionsError("Could not load major options from backend.");
-      }
-    }
-
-    loadMajors();
-  }, []);
-
-
   function triggerUpload() {
     fileInputRef.current?.click();
   }
@@ -794,7 +673,7 @@ export default function DegreePlannerFrontend() {
 
     const text = await extractTextFromPdf(file);
     const parsedCourses = extractCoursesFromDarsText(text);
-    setParsedCoursesForProgress(parsedCourses);
+
     const yearMap = new Map<number, Map<string, ParsedCourse[]>>();
 
     for (const c of parsedCourses) {
@@ -833,21 +712,6 @@ export default function DegreePlannerFrontend() {
     for (const y of years) nextOpen[y.classYearLabel] = true;
     setOpenMap(nextOpen);
 
-    if (majorOptions.length > 0) {
-      const detected = detectMajorFromDarsText(text, majorOptions);
-      if (detected) {
-        setSelectedMajor(detected);
-      }
-    }
-
-    const selectedForEval = detectMajorFromDarsText(text, majorOptions) ?? selectedMajor;
-    if (selectedForEval && majorRequirements.length > 0) {
-      const local = evaluateLocalMajorProgress(majorRequirements, selectedForEval, selectedDegreeType, parsedCourses);
-      if (local) {
-        setMajorProgress(local);
-        setProgressError("");
-      }
-    }
     setIsParsed(true);
   }
 
@@ -863,7 +727,6 @@ export default function DegreePlannerFrontend() {
     setOpenMap(next);
   }
 
-  // Drawer logic
   function openCourseDrawerForTerm(termName: string) {
     setDrawerTermName(termName);
     setDrawerSubject("");
@@ -920,73 +783,8 @@ export default function DegreePlannerFrontend() {
     setDrawerOpen(false);
   }
 
-  async function computeMajorProgress() {
-    if (!selectedMajor) {
-      setProgressError("Select a major first.");
-      return;
-    }
-
-    setProgressLoading(true);
-    setProgressError("");
-    try {
-      const payload = {
-        major: selectedMajor,
-        degreeType: selectedDegreeType,
-        studentCourses: parsedCoursesForProgress.map((c) => ({
-          subject: c.subject,
-          number: c.number,
-          credits: c.credits,
-          grade: c.grade,
-        })),
-      };
-      
-     let data: any = null;
-      let ok = false;
-      let lastError: unknown = null;
-
-      for (const base of backendCandidates()) {
-        const url = `${base}/api/major-progress`;
-        try {
-          const response = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-          data = await response.json();
-          if (!response.ok) {
-            lastError = new Error(data?.error ?? `Request failed ${response.status}`);
-            continue;
-          }
-          ok = true;
-          break;
-        } catch (e) {
-          lastError = e;
-        }}
-      if (!ok) throw lastError ?? new Error("Failed to calculate major progress");
-      setMajorProgress({
-        major: data.major,
-        degreeType: data.degreeType,
-        majorCompletionPercent: data.majorCompletionPercent,
-        evaluatedGroups: data.evaluatedGroups,
-      });
-    } catch (error) {
-      const local = evaluateLocalMajorProgress(majorRequirements, selectedMajor, selectedDegreeType, parsedCoursesForProgress);
-      if (local) {
-        setMajorProgress(local);
-        setProgressError("Backend unavailable. Showing local estimate.");
-      } else {
-        setProgressError(String(error));
-        setMajorProgress(null);
-      }
-    } finally {
-      setProgressLoading(false);
-    }
-  }
-
-
   return (
     <div className="min-h-screen bg-gray-100">
-      {/* Top Nav */}
       <header className="bg-red-700 text-white">
         <div className="mx-auto flex h-14 w-full items-center justify-between px-6">
           <div className="flex items-center gap-6">
@@ -995,31 +793,25 @@ export default function DegreePlannerFrontend() {
               <span className="text-sm font-semibold">BadgerPath AI</span>
             </div>
 
-            <nav className="hidden md:flex items-center gap-4 text-sm">
+            <nav className="flex items-center gap-4 text-sm">
               <button
                 type="button"
                 onClick={() => setActivePage("dars")}
-                className={classNames(
-                  activePage === "dars" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100"
-                )}
+                className={classNames(activePage === "dars" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100")}
               >
                 DARS Planner
               </button>
               <button
                 type="button"
                 onClick={() => setActivePage("degree")}
-                className={classNames(
-                  activePage === "degree" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100"
-                )}
+                className={classNames(activePage === "degree" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100")}
               >
                 Degree Planner
               </button>
               <button
                 type="button"
                 onClick={() => navigate("/ai-advisor")}
-                className={classNames(
-                  activePage === "qualcomm" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100"
-                )}
+                className="opacity-90 hover:opacity-100"
               >
                 AI Advisor
               </button>
@@ -1039,7 +831,6 @@ export default function DegreePlannerFrontend() {
       </header>
 
       <main className="mx-auto grid w-full grid-cols-1 gap-4 px-6 py-4 lg:grid-cols-[320px_minmax(0,1fr)]">
-        {/* Left */}
         <aside className="rounded-lg border bg-white p-4">
           {activePage === "dars" ? (
             <>
@@ -1095,12 +886,8 @@ export default function DegreePlannerFrontend() {
                 {activePage === "dars" ? (
                   uploadedFile ? (
                     <>
-                      <div className="truncate">
-                        <span className="font-medium">File:</span> {uploadedFile.name}
-                      </div>
-                      <div>
-                        <span className="font-medium">Parsing:</span> {isParsed ? "Populated all years" : "Parsing..."}
-                      </div>
+                      <div className="truncate"><span className="font-medium">File:</span> {uploadedFile.name}</div>
+                      <div><span className="font-medium">Parsing:</span> {isParsed ? "Populated all years" : "Parsing..."}</div>
                     </>
                   ) : (
                     <>Upload a DARS PDF to populate your plan automatically.</>
@@ -1110,64 +897,9 @@ export default function DegreePlannerFrontend() {
                 )}
               </div>
             </div>
-            
-            <div className="rounded-lg border bg-gray-50 p-3 text-sm text-gray-700 space-y-2">
-              <div className="text-xs text-gray-500">Degree Progress</div>
-              <div className="grid grid-cols-1 gap-2">
-                <select
-                  className="rounded border bg-white px-2 py-1 text-sm"
-                  value={selectedMajor}
-                  onChange={(e) => setSelectedMajor(e.target.value)}
-                  disabled={majorOptions.length === 0}
-                >
-                  {majorOptions.length === 0 && <option value="">Loading majors...</option>}
-                  {majorOptions.map((major) => (
-                    <option key={major} value={major}>{major}</option>
-                  ))}
-                </select>
-
-                <select
-                  className="rounded border bg-white px-2 py-1 text-sm"
-                  value={selectedDegreeType}
-                  onChange={(e) => setSelectedDegreeType(e.target.value)}
-                >
-                  <option value="BA">BA</option>
-                  <option value="BS">BS</option>
-                </select>
-
-                <button
-                  type="button"
-                  className="rounded bg-red-700 px-3 py-1.5 text-white text-sm hover:bg-red-800 disabled:opacity-60"
-                  onClick={computeMajorProgress}
-                  disabled={progressLoading || parsedCoursesForProgress.length === 0}
-                >
-                  {progressLoading ? "Calculating..." : "Calculate Progress"}
-                </button>
-              </div>
-
-              {majorProgress && (
-                <>
-                  <div className="text-xs text-gray-600">
-                    {majorProgress.major} ({majorProgress.degreeType}) · {majorProgress.evaluatedGroups} groups evaluated
-                  </div>
-                  <div className="h-2 w-full rounded bg-gray-200 overflow-hidden">
-                    <div
-                      className="h-full bg-red-700 transition-all"
-                      style={{ width: `${Math.max(0, Math.min(100, majorProgress.majorCompletionPercent))}%` }}
-                    />
-                  </div>
-                  <div className="text-xs text-gray-600">Degree Percentage Completed</div>
-                  <div className="text-sm font-semibold text-gray-900">{majorProgress.majorCompletionPercent.toFixed(2)}%</div>
-                </>
-              )}
-
-              {majorOptionsError && <div className="text-xs text-red-700">{majorOptionsError}</div>}
-              {progressError && <div className="text-xs text-red-700">{progressError}</div>}
-            </div>
 
             <div className="flex items-center justify-between">
               <span className="text-sm text-gray-700">Show Grades</span>
-
               <button
                 type="button"
                 role="switch"
@@ -1186,19 +918,73 @@ export default function DegreePlannerFrontend() {
                 />
               </button>
             </div>
+
+            {/* BA/BS Toggle */}
+            <div className="mt-3 flex items-center justify-between">
+              <span className="text-sm text-gray-700">Target degree</span>
+              <div className="inline-flex rounded border bg-white overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setDegreeFilter("BA")}
+                  className={classNames(
+                    "px-3 py-1 text-sm",
+                    degreeFilter === "BA" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-50"
+                  )}
+                >
+                  BA
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDegreeFilter("BS")}
+                  className={classNames(
+                    "px-3 py-1 text-sm border-l",
+                    degreeFilter === "BS" ? "bg-blue-600 text-white" : "text-gray-700 hover:bg-gray-50"
+                  )}
+                >
+                  BS
+                </button>
+              </div>
+            </div>
+
+            {/* Top 5 majors progress bars */}
+            <div className="rounded-lg border bg-gray-50 p-3">
+              <div className="text-xs text-gray-500 mb-2">Top majors you’re closest to</div>
+
+              {!topMajors ? (
+                <div className="text-sm text-gray-600">Calculating…</div>
+              ) : topMajors.length === 0 ? (
+                <div className="text-sm text-gray-600">Add courses or upload DARS to see progress.</div>
+              ) : (
+                <div className="space-y-3">
+                  {topMajors.map((m) => (
+                    <div key={`${m.major}-${m.degreeType}`} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <div className="font-medium text-gray-800">{m.major}</div>
+                        <div className="text-gray-700">{Math.round(m.percent)}%</div>
+                      </div>
+                      <div className="h-2 w-full rounded bg-gray-200 overflow-hidden">
+                        <div className="h-full bg-blue-600" style={{ width: `${Math.max(0, Math.min(100, m.percent))}%` }} />
+                      </div>
+                      <div className="text-[11px] text-gray-600">
+                        {m.satisfiedGroups}/{m.totalGroups} groups satisfied
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {majorsFromConvex === undefined && (
+                <div className="mt-2 text-[11px] text-gray-500">Loading majors list…</div>
+              )}
+            </div>
           </div>
         </aside>
 
-        {/* Center */}
         <section className="space-y-4">
           <div className="flex items-center justify-end gap-3 text-sm">
-            <button className="text-blue-700 hover:underline" type="button" onClick={expandAll}>
-              Expand All
-            </button>
+            <button className="text-blue-700 hover:underline" type="button" onClick={expandAll}>Expand All</button>
             <span className="text-gray-300">|</span>
-            <button className="text-blue-700 hover:underline" type="button" onClick={collapseAll}>
-              Collapse All
-            </button>
+            <button className="text-blue-700 hover:underline" type="button" onClick={collapseAll}>Collapse All</button>
           </div>
 
           <div className="space-y-2">
@@ -1232,16 +1018,10 @@ export default function DegreePlannerFrontend() {
       {drawerOpen && (
         <div className="fixed inset-0 z-50">
           <div className="absolute inset-0 bg-black/30" onClick={() => setDrawerOpen(false)} />
-
           <div className="absolute right-0 top-0 h-full w-full max-w-[420px] bg-white shadow-xl flex flex-col">
             <div className="bg-sky-700 text-white px-5 py-4 flex items-center justify-between">
               <div className="text-lg font-semibold">Course Search</div>
-              <button
-                className="rounded px-2 py-1 hover:bg-white/10"
-                type="button"
-                onClick={() => setDrawerOpen(false)}
-                aria-label="Close"
-              >
+              <button className="rounded px-2 py-1 hover:bg-white/10" type="button" onClick={() => setDrawerOpen(false)} aria-label="Close">
                 ✕
               </button>
             </div>
@@ -1252,16 +1032,10 @@ export default function DegreePlannerFrontend() {
 
               <div>
                 <label className="block text-xs text-gray-500 mb-2">Subject</label>
-                <select
-                  className="w-full rounded border px-3 py-2 text-sm"
-                  value={drawerSubject}
-                  onChange={(e) => setDrawerSubject(e.target.value)}
-                >
+                <select className="w-full rounded border px-3 py-2 text-sm" value={drawerSubject} onChange={(e) => setDrawerSubject(e.target.value)}>
                   <option value="">All subjects</option>
                   {subjects.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
+                    <option key={s} value={s}>{s}</option>
                   ))}
                 </select>
               </div>
@@ -1278,19 +1052,9 @@ export default function DegreePlannerFrontend() {
                       if (e.key === "Enter") runCourseSearch();
                     }}
                   />
-                  <button
-                    className="rounded border px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-                    type="button"
-                    onClick={runCourseSearch}
-                  >
+                  <button className="rounded border px-4 py-2 text-sm font-semibold hover:bg-gray-50" type="button" onClick={runCourseSearch}>
                     Search
                   </button>
-                </div>
-
-                <div className="mt-2 text-xs text-gray-500">
-                  {drawerSubject
-                    ? `Showing ${drawerResults.length} result(s) for ${drawerSubject}${drawerQuery ? ` + "${drawerQuery}"` : ""}`
-                    : `Select a subject to narrow results (or search all).`}
                 </div>
               </div>
 

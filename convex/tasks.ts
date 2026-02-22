@@ -1,3 +1,4 @@
+import { v } from "convex/values";
 import { query } from "./_generated/server";
 
 export const getUniversity = query({
@@ -22,6 +23,18 @@ export const getMajorReqs = query({
         return await ctx.db.query("MajorReqs").collect();
     },
 });
+
+export const getMajorRequirement = query({
+    args: {major: v.string()},
+    handler:async (ctx, args) => {
+        const temp = await ctx.db.query("MajorReqs").collect();
+
+        for (let i = 0; i < 65; i++){
+            if (temp[i].major == args.major)
+                return temp[i].requirementGroups;
+        }
+    }
+})
 
 
 export const getGEReqs = query({
