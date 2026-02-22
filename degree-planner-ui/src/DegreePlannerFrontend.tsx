@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
 import Papa from "papaparse";
+import { useNavigate } from "react-router-dom";
 
 // (Optional) Convex imports — you can keep/remove if unused.
 // import { useQuery } from "convex/react";
@@ -47,7 +48,24 @@ type ParsedCourse = {
   grade: string; // "A", "BC", "INP", ...
   title: string;
 };
+type MajorProgressResult = {
+  major: string;
+  degreeType: string;
+  majorCompletionPercent: number;
+  evaluatedGroups: number;
+};
+type RequirementGroup = {
+  groupId: string;
+  ruleType: "choose_n_courses" | "min_credits" | "manual_review";
+  requiredCount: number | null;
+  requiredCredits: number | null;
+  courses: string[];
+};
 
+type MajorRequirement = {
+  major: string;
+  requirementGroups: RequirementGroup[];
+};
 type CatalogCourse = {
   courseId: string; // "ACCT I S 100"
   title: string;
@@ -468,6 +486,134 @@ function splitCourseId(courseId: string): { subject: string; number: string } {
   return { subject: courseId.trim(), number: "" };
 }
 
+function backendCandidates(): string[] {
+  const envBase = (import.meta as any)?.env?.VITE_BACKEND_URL as string | undefined;
+  const vals = [envBase, "", "http://localhost:8000"].filter((v): v is string => Boolean(v));
+  return Array.from(new Set(vals));
+}
+
+async function fetchJsonFromCandidates(path: string): Promise<any> {
+  let lastError: unknown = null;
+  for (const base of backendCandidates()) {
+    const url = `${base}${path}`;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) {
+        lastError = new Error(`${url} -> ${r.status}`);
+        continue;
+      }
+      return await r.json();
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError ?? new Error(`Failed to fetch ${path}`);
+}
+function canon(value = "") {
+  return String(value).trim().toUpperCase().replace(/\s+/g, " ");
+}
+
+function optionParts(option: string) {
+  return String(option)
+    .split(/\s*&\s*/)
+    .map((v) => canon(v))
+    .filter(Boolean);
+}
+
+function evaluateLocalMajorProgress(
+  requirements: MajorRequirement[],
+  major: string,
+  degreeType: string,
+  courses: ParsedCourse[]
+): MajorProgressResult | null {
+  const majorObj = requirements.find((m) => canon(m.major) === canon(major));
+  if (!majorObj) return null;
+
+  const completed = courses.filter((c) => !["INP", "IP", "W", "UW"].includes(c.grade.toUpperCase()));
+  const remaining = new Set(completed.map((c) => canon(`${c.subject} ${c.number}`)));
+  const creditsMap = new Map(completed.map((c) => [canon(`${c.subject} ${c.number}`), c.credits]));
+
+  const ratios: number[] = [];
+
+  for (const group of majorObj.requirementGroups ?? []) {
+    if (group.ruleType === "choose_n_courses") {
+      const required = Number(group.requiredCount ?? 0);
+      if (required <= 0) {
+        ratios.push(0);
+        continue;
+      }
+
+      const candidates = (group.courses ?? []).map((opt) => {
+        const parts = optionParts(opt);
+        const matched = parts.filter((p) => remaining.has(p));
+        const score = parts.length ? matched.length / parts.length : 0;
+        return { score, matched, full: parts.length > 0 && matched.length === parts.length };
+      });
+
+      candidates.sort((a, b) => Number(b.full) - Number(a.full) || b.score - a.score);
+      const picked = candidates.slice(0, required);
+      const total = picked.reduce((sum, p) => sum + p.score, 0);
+      picked.forEach((p) => p.matched.forEach((m) => remaining.delete(m)));
+      ratios.push(Math.min(total / required, 1));
+      continue;
+    }
+
+    if (group.ruleType === "min_credits") {
+      const required = Number(group.requiredCredits ?? 0);
+      if (required <= 0) {
+        ratios.push(0);
+        continue;
+      }
+
+      const matched: Array<{ id: string; credits: number }> = [];
+      for (const opt of group.courses ?? []) {
+        const cid = canon(opt);
+        if (remaining.has(cid)) matched.push({ id: cid, credits: Number(creditsMap.get(cid) ?? 0) });
+      }
+
+      matched.sort((a, b) => b.credits - a.credits);
+      let earned = 0;
+      for (const item of matched) {
+        remaining.delete(item.id);
+        earned += item.credits;
+        if (earned >= required) break;
+      }
+
+      ratios.push(Math.min(earned / required, 1));
+      continue;
+    }
+
+    ratios.push(0);
+  }
+
+  return {
+    major: majorObj.major,
+    degreeType,
+    majorCompletionPercent: Number(((ratios.reduce((a, b) => a + b, 0) / Math.max(ratios.length, 1)) * 100).toFixed(2)),
+    evaluatedGroups: majorObj.requirementGroups?.length ?? 0,
+  };
+}
+
+function detectMajorFromDarsText(text: string, majors: string[]): string | null {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const candidates: string[] = [];
+
+  for (const line of lines) {
+    const m = line.match(/(?:major|program|plan)\s*[:\-]\s*(.+)$/i);
+    if (m?.[1]) candidates.push(m[1]);
+  }
+
+  const normalizedMajors = majors.map((m) => ({ raw: m, key: canon(m) }));
+  for (const candidate of candidates) {
+    const key = canon(candidate);
+    const exact = normalizedMajors.find((m) => m.key === key);
+    if (exact) return exact.raw;
+    const fuzzy = normalizedMajors.find((m) => key.includes(m.key) || m.key.includes(key));
+    if (fuzzy) return fuzzy.raw;
+  }
+
+  return null;
+}
 // -------- Manual planner helpers --------
 function makeEmptyTerm(name: string): Term {
   return {
@@ -498,6 +644,7 @@ function createEmptyFourYears(startYear: number): PlannerYear[] {
 }
 
 export default function DegreePlannerFrontend() {
+  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [activePage, setActivePage] = useState<PlannerMode>("dars");
@@ -508,7 +655,15 @@ export default function DegreePlannerFrontend() {
 
   const [plannerYears, setPlannerYears] = useState<PlannerYear[]>([]);
   const [openMap, setOpenMap] = useState<Record<string, boolean>>({});
-
+  const [parsedCoursesForProgress, setParsedCoursesForProgress] = useState<ParsedCourse[]>([]);
+  const [majorOptions, setMajorOptions] = useState<string[]>([]);
+  const [majorRequirements, setMajorRequirements] = useState<MajorRequirement[]>([]);
+  const [majorOptionsError, setMajorOptionsError] = useState<string>("");
+  const [selectedMajor, setSelectedMajor] = useState<string>("");
+  const [selectedDegreeType, setSelectedDegreeType] = useState<string>("BA");
+  const [majorProgress, setMajorProgress] = useState<MajorProgressResult | null>(null);
+  const [progressLoading, setProgressLoading] = useState(false);
+  const [progressError, setProgressError] = useState<string>("");
   // Catalog state
   const [catalog, setCatalog] = useState<CatalogCourse[]>([]);
   const [subjects, setSubjects] = useState<string[]>([]);
@@ -582,6 +737,51 @@ export default function DegreePlannerFrontend() {
       .catch((e) => console.error("Failed to load uwmadison_courses.csv", e));
   }, []);
 
+  React.useEffect(() => {
+    async function loadMajors() {
+      setMajorOptionsError("");
+
+      const tryApi = async (): Promise<string[]> => {
+        const payload = await fetchJsonFromCandidates("/api/majors");
+        return Array.isArray(payload?.majors) ? payload.majors : [];
+      };
+
+      const tryStatic = async (): Promise<string[]> => {
+        const payload = await fetchJsonFromCandidates("/data/normalized/MajorSpecificRequirements.JSON");
+        if (!Array.isArray(payload)) return [];
+        const typed = payload.filter((m): m is MajorRequirement => m && typeof m.major === "string" && Array.isArray(m.requirementGroups));
+        setMajorRequirements(typed);
+        return typed
+          .map((m) => m.major)
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b));
+      };
+
+      try {
+        let majors = await tryApi();
+        if (majors.length === 0) {
+          majors = await tryStatic();
+        }
+
+        setMajorOptions(majors);
+        if (majors.length > 0) {
+          setSelectedMajor((prev) => prev || majors[0]);
+          if (majorRequirements.length === 0) {
+            await tryStatic();
+          }
+        } else {
+          setMajorOptionsError("No major options were found.");
+        }
+      } catch (e) {
+        console.error("Failed to load majors", e);
+        setMajorOptionsError("Could not load major options from backend.");
+      }
+    }
+
+    loadMajors();
+  }, []);
+
+
   function triggerUpload() {
     fileInputRef.current?.click();
   }
@@ -594,7 +794,7 @@ export default function DegreePlannerFrontend() {
 
     const text = await extractTextFromPdf(file);
     const parsedCourses = extractCoursesFromDarsText(text);
-
+    setParsedCoursesForProgress(parsedCourses);
     const yearMap = new Map<number, Map<string, ParsedCourse[]>>();
 
     for (const c of parsedCourses) {
@@ -633,6 +833,21 @@ export default function DegreePlannerFrontend() {
     for (const y of years) nextOpen[y.classYearLabel] = true;
     setOpenMap(nextOpen);
 
+    if (majorOptions.length > 0) {
+      const detected = detectMajorFromDarsText(text, majorOptions);
+      if (detected) {
+        setSelectedMajor(detected);
+      }
+    }
+
+    const selectedForEval = detectMajorFromDarsText(text, majorOptions) ?? selectedMajor;
+    if (selectedForEval && majorRequirements.length > 0) {
+      const local = evaluateLocalMajorProgress(majorRequirements, selectedForEval, selectedDegreeType, parsedCourses);
+      if (local) {
+        setMajorProgress(local);
+        setProgressError("");
+      }
+    }
     setIsParsed(true);
   }
 
@@ -705,6 +920,70 @@ export default function DegreePlannerFrontend() {
     setDrawerOpen(false);
   }
 
+  async function computeMajorProgress() {
+    if (!selectedMajor) {
+      setProgressError("Select a major first.");
+      return;
+    }
+
+    setProgressLoading(true);
+    setProgressError("");
+    try {
+      const payload = {
+        major: selectedMajor,
+        degreeType: selectedDegreeType,
+        studentCourses: parsedCoursesForProgress.map((c) => ({
+          subject: c.subject,
+          number: c.number,
+          credits: c.credits,
+          grade: c.grade,
+        })),
+      };
+      
+     let data: any = null;
+      let ok = false;
+      let lastError: unknown = null;
+
+      for (const base of backendCandidates()) {
+        const url = `${base}/api/major-progress`;
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          data = await response.json();
+          if (!response.ok) {
+            lastError = new Error(data?.error ?? `Request failed ${response.status}`);
+            continue;
+          }
+          ok = true;
+          break;
+        } catch (e) {
+          lastError = e;
+        }}
+      if (!ok) throw lastError ?? new Error("Failed to calculate major progress");
+      setMajorProgress({
+        major: data.major,
+        degreeType: data.degreeType,
+        majorCompletionPercent: data.majorCompletionPercent,
+        evaluatedGroups: data.evaluatedGroups,
+      });
+    } catch (error) {
+      const local = evaluateLocalMajorProgress(majorRequirements, selectedMajor, selectedDegreeType, parsedCoursesForProgress);
+      if (local) {
+        setMajorProgress(local);
+        setProgressError("Backend unavailable. Showing local estimate.");
+      } else {
+        setProgressError(String(error));
+        setMajorProgress(null);
+      }
+    } finally {
+      setProgressLoading(false);
+    }
+  }
+
+
   return (
     <div className="min-h-screen bg-gray-100">
       {/* Top Nav */}
@@ -737,12 +1016,12 @@ export default function DegreePlannerFrontend() {
               </button>
               <button
                 type="button"
-                onClick={() => setActivePage("qualcomm")}
+                onClick={() => navigate("/ai-advisor")}
                 className={classNames(
                   activePage === "qualcomm" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100"
                 )}
               >
-                Artifical Intelligence
+                AI Advisor
               </button>
             </nav>
           </div>
@@ -830,6 +1109,60 @@ export default function DegreePlannerFrontend() {
                   <>No upload needed. Use + Add Course in any term.</>
                 )}
               </div>
+            </div>
+            
+            <div className="rounded-lg border bg-gray-50 p-3 text-sm text-gray-700 space-y-2">
+              <div className="text-xs text-gray-500">Degree Progress</div>
+              <div className="grid grid-cols-1 gap-2">
+                <select
+                  className="rounded border bg-white px-2 py-1 text-sm"
+                  value={selectedMajor}
+                  onChange={(e) => setSelectedMajor(e.target.value)}
+                  disabled={majorOptions.length === 0}
+                >
+                  {majorOptions.length === 0 && <option value="">Loading majors...</option>}
+                  {majorOptions.map((major) => (
+                    <option key={major} value={major}>{major}</option>
+                  ))}
+                </select>
+
+                <select
+                  className="rounded border bg-white px-2 py-1 text-sm"
+                  value={selectedDegreeType}
+                  onChange={(e) => setSelectedDegreeType(e.target.value)}
+                >
+                  <option value="BA">BA</option>
+                  <option value="BS">BS</option>
+                </select>
+
+                <button
+                  type="button"
+                  className="rounded bg-red-700 px-3 py-1.5 text-white text-sm hover:bg-red-800 disabled:opacity-60"
+                  onClick={computeMajorProgress}
+                  disabled={progressLoading || parsedCoursesForProgress.length === 0}
+                >
+                  {progressLoading ? "Calculating..." : "Calculate Progress"}
+                </button>
+              </div>
+
+              {majorProgress && (
+                <>
+                  <div className="text-xs text-gray-600">
+                    {majorProgress.major} ({majorProgress.degreeType}) · {majorProgress.evaluatedGroups} groups evaluated
+                  </div>
+                  <div className="h-2 w-full rounded bg-gray-200 overflow-hidden">
+                    <div
+                      className="h-full bg-red-700 transition-all"
+                      style={{ width: `${Math.max(0, Math.min(100, majorProgress.majorCompletionPercent))}%` }}
+                    />
+                  </div>
+                  <div className="text-xs text-gray-600">Degree Percentage Completed</div>
+                  <div className="text-sm font-semibold text-gray-900">{majorProgress.majorCompletionPercent.toFixed(2)}%</div>
+                </>
+              )}
+
+              {majorOptionsError && <div className="text-xs text-red-700">{majorOptionsError}</div>}
+              {progressError && <div className="text-xs text-red-700">{progressError}</div>}
             </div>
 
             <div className="flex items-center justify-between">
