@@ -9,7 +9,7 @@ import Papa from "papaparse";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type PlannerMode = "dars" | "degree";
+type PlannerMode = "dars" | "degree" | "qualcomm";
 
 type TermStatus = "completed" | "in_progress" | "cart";
 type CourseFlag = "in_progress" | "waitlisted" | "not_offered" | "no_longer_offered";
@@ -734,6 +734,15 @@ export default function DegreePlannerFrontend() {
                 )}
               >
                 Degree Planner
+              </button>
+              <button
+                type="button"
+                onClick={() => setActivePage("qualcomm")}
+                className={classNames(
+                  activePage === "qualcomm" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100"
+                )}
+              >
+                Artifical Intelligence
               </button>
             </nav>
           </div>
