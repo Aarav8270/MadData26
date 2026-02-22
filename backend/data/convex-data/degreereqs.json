@@ -1,0 +1,38 @@
+[
+    {
+        "name": "BS",
+        "mathematics": 6,
+        "language":true,
+        "ethnicstudies":true ,
+        "LSBreadth": {
+            "humanities": 12,
+            "literature": 6, 
+            "socialscience": 12,
+            "NaturalScience": 0,
+            "BiologicalScience": 6,
+            "PhysicalScience": 6
+        },
+        "LASCoursework": 108,
+        "InterAdvCoursework": 60,
+        "TotalCredits": 120,
+        "GPA": 2.0
+    },
+    {
+        "name": "BA",
+        "mathematics": 0,
+        "language":true,
+        "ethnicstudies":true ,
+        "LSBreadth": {
+            "humanities": 12,
+            "literature": 6, 
+            "socialscience": 12,
+            "NaturalScience": 12,
+            "BiologicalScience": 3,
+            "PhysicalScience": 3
+        },
+        "LASCoursework": 108,
+        "InterAdvCoursework": 60,
+        "TotalCredits": 120,
+        "GPA": 2.0
+    }
+]

@@ -680,15 +680,11 @@ export default function DegreePlannerFrontend() {
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
               <div className="h-8 w-8 rounded bg-white/15 flex items-center justify-center font-bold">W</div>
-              <span className="text-sm font-semibold">enroll.wisc.edu</span>
+              <span className="text-sm font-semibold">BadgerPath AI</span>
             </div>
 
             <nav className="hidden md:flex items-center gap-4 text-sm">
-              <a className="opacity-90 hover:opacity-100" href="#">Course Search</a>
-              <a className="opacity-90 hover:opacity-100" href="#">My Courses</a>
-              <a className="opacity-90 hover:opacity-100" href="#">Scheduler</a>
               <a className="font-semibold underline underline-offset-8" href="#">Degree Planner</a>
-              <a className="opacity-90 hover:opacity-100" href="#">Degree Audit (DARS)</a>
             </nav>
           </div>
 
