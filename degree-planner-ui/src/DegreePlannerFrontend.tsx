@@ -2,11 +2,14 @@ import React, { useMemo, useRef, useState } from "react";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker?url";
 import Papa from "papaparse";
-//temp for test
-import { useQuery } from "convex/react";
-import { api } from "../../convex/_generated/api";
+
+// (Optional) Convex imports — you can keep/remove if unused.
+// import { useQuery } from "convex/react";
+// import { api } from "../../convex/_generated/api";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
+
+type PlannerMode = "dars" | "degree";
 
 type TermStatus = "completed" | "in_progress" | "cart";
 type CourseFlag = "in_progress" | "waitlisted" | "not_offered" | "no_longer_offered";
@@ -41,11 +44,10 @@ type ParsedCourse = {
   subject: string; // "COMP SCI"
   number: string; // "564"
   credits: number;
-  grade: string; // "A", "BC", "INP", "T", etc
+  grade: string; // "A", "BC", "INP", ...
   title: string;
 };
 
-// -------- Catalog types (CSV) --------
 type CatalogCourse = {
   courseId: string; // "ACCT I S 100"
   title: string;
@@ -53,6 +55,8 @@ type CatalogCourse = {
   subject: string; // "ACCT I S"
   number: string; // "100"
 };
+
+type CsvRow = Record<string, string | number | null | undefined>;
 
 function classNames(...xs: Array<string | false | undefined | null>) {
   return xs.filter(Boolean).join(" ");
@@ -136,11 +140,7 @@ function AccordionRow({
 }) {
   return (
     <div className="rounded-lg border bg-white">
-      <button
-        className="flex w-full items-center justify-between px-4 py-3 text-left"
-        onClick={onToggle}
-        type="button"
-      >
+      <button className="flex w-full items-center justify-between px-4 py-3 text-left" onClick={onToggle} type="button">
         <span className="text-sm font-medium text-gray-900">{title}</span>
         <span className={classNames("transition-transform", open && "rotate-180")}>
           <Icon name="chev" />
@@ -177,10 +177,9 @@ function TermCard({
 
   const [activeTab, setActiveTab] = useState<TermStatus>("completed");
   React.useEffect(() => {
-  if (term.cartCount > 0) {
-    setActiveTab("cart");
-  }
-}, [term.cartCount]);
+    if (term.cartCount > 0) setActiveTab("cart");
+  }, [term.cartCount]);
+
   const courses = term.courses.filter((c) => c.status === activeTab);
 
   return (
@@ -327,7 +326,6 @@ function parseCourseLine(line: string): ParsedCourse | null {
   const year = 2000 + Number(m[2]);
   let rest = m[3].trim();
 
-  // Fix stuck subject+number e.g. "SCI252" -> "SCI 252"
   rest = rest.replace(/([A-Z]{2,})(\d{3,4}[A-Z]?)/g, "$1 $2");
 
   const tokens = rest.split(" ").filter(Boolean);
@@ -470,8 +468,39 @@ function splitCourseId(courseId: string): { subject: string; number: string } {
   return { subject: courseId.trim(), number: "" };
 }
 
+// -------- Manual planner helpers --------
+function makeEmptyTerm(name: string): Term {
+  return {
+    name,
+    totalCredits: 0,
+    completedCount: 0,
+    inProgressCount: 0,
+    cartCount: 0,
+    courses: [],
+  };
+}
+
+function createEmptyFourYears(startYear: number): PlannerYear[] {
+  const labels = ["Freshman", "Sophomore", "Junior", "Senior"];
+  return labels.map((label, idx) => {
+    const fallYear = startYear + idx;
+    const springYear = fallYear + 1;
+    return {
+      academicYearLabel: `${fallYear}-${springYear}`,
+      classYearLabel: label,
+      terms: [
+        makeEmptyTerm(`Fall ${fallYear}`),
+        makeEmptyTerm(`Spring ${springYear}`),
+        makeEmptyTerm(`Summer ${springYear}`),
+      ],
+    };
+  });
+}
+
 export default function DegreePlannerFrontend() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [activePage, setActivePage] = useState<PlannerMode>("dars");
 
   const [showGrades, setShowGrades] = useState(true);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -480,7 +509,7 @@ export default function DegreePlannerFrontend() {
   const [plannerYears, setPlannerYears] = useState<PlannerYear[]>([]);
   const [openMap, setOpenMap] = useState<Record<string, boolean>>({});
 
-  // -------- Catalog state --------
+  // Catalog state
   const [catalog, setCatalog] = useState<CatalogCourse[]>([]);
   const [subjects, setSubjects] = useState<string[]>([]);
 
@@ -491,35 +520,48 @@ export default function DegreePlannerFrontend() {
   const [drawerQuery, setDrawerQuery] = useState<string>("");
   const [drawerResults, setDrawerResults] = useState<CatalogCourse[]>([]);
 
+  // Init manual degree planner when switching to Degree Planner tab
+  React.useEffect(() => {
+    if (activePage !== "degree") return;
+
+    const startYear = new Date().getFullYear();
+    const years = createEmptyFourYears(startYear);
+    setPlannerYears(years);
+
+    const nextOpen: Record<string, boolean> = {};
+    for (const y of years) nextOpen[y.classYearLabel] = true;
+    setOpenMap(nextOpen);
+
+    setUploadedFile(null);
+    setIsParsed(true);
+  }, [activePage]);
+
   // Load catalog once
   React.useEffect(() => {
     fetch("/uwmadison_courses.csv")
       .then((r) => r.text())
       .then((text) => {
-        const parsed = Papa.parse<Record<string, any>>(text, {
-          header: true,
-          skipEmptyLines: true,
-        });
+        const parsed = Papa.parse<CsvRow>(text, { header: true, skipEmptyLines: true });
+        const rows = (parsed.data ?? []).filter(Boolean) as CsvRow[];
 
-        const rows = (parsed.data ?? []).filter(Boolean);
-
-        const mapped: CatalogCourse[] = rows
-          .map((row) => {
-            // 🔧 If your CSV headers differ, adjust here
+        const mapped = rows
+          .map((row: CsvRow): CatalogCourse | null => {
             const courseId =
               row.courseId ?? row.course_id ?? row["course id"] ?? row["Course ID"] ?? row["courseId"] ?? "";
             const title =
               row.title ?? row.course_title ?? row["course title"] ?? row["Title"] ?? "";
+
             const creditsRaw =
-  row.credit ??
-  row.credits ??
-  row.course_credits ??
-  row["Credit"] ??
-  row["Credits"] ??
-  row["credit"] ??
-  row["credit_hours"] ??
-  row["Credit Hours"] ??
-  0;
+              row.credit ??
+              row.credits ??
+              row.course_credits ??
+              row["Credit"] ??
+              row["Credits"] ??
+              row["credit"] ??
+              row["credit_hours"] ??
+              row["Credit Hours"] ??
+              0;
+
             if (!courseId || !title) return null;
 
             const { subject, number } = splitCourseId(String(courseId));
@@ -531,10 +573,9 @@ export default function DegreePlannerFrontend() {
               number,
             };
           })
-          .filter((x): x is CatalogCourse => Boolean(x));
+          .filter((x): x is CatalogCourse => x !== null);
 
         setCatalog(mapped);
-
         const subj = Array.from(new Set(mapped.map((c) => c.subject))).sort((a, b) => a.localeCompare(b));
         setSubjects(subj);
       })
@@ -575,17 +616,13 @@ export default function DegreePlannerFrontend() {
       const spring = `Spring ${startYear + 1}`;
       const summer = `Summer ${startYear + 1}`;
 
-      const fallCourses = termMap.get(fall) ?? [];
-      const springCourses = termMap.get(spring) ?? [];
-      const summerCourses = termMap.get(summer) ?? [];
-
       return {
         academicYearLabel: academicYearLabel(startYear),
         classYearLabel: classYearLabelByIndex(idx),
         terms: [
-          buildTerm(fall, fallCourses),
-          buildTerm(spring, springCourses),
-          buildTerm(summer, summerCourses),
+          buildTerm(fall, termMap.get(fall) ?? []),
+          buildTerm(spring, termMap.get(spring) ?? []),
+          buildTerm(summer, termMap.get(summer) ?? []),
         ],
       };
     });
@@ -611,7 +648,7 @@ export default function DegreePlannerFrontend() {
     setOpenMap(next);
   }
 
-  // -------- Drawer logic --------
+  // Drawer logic
   function openCourseDrawerForTerm(termName: string) {
     setDrawerTermName(termName);
     setDrawerSubject("");
@@ -625,7 +662,6 @@ export default function DegreePlannerFrontend() {
     const q = drawerQuery.trim().toLowerCase();
 
     let filtered = catalog;
-
     if (subj) filtered = filtered.filter((c) => c.subject === subj);
 
     if (q) {
@@ -669,9 +705,6 @@ export default function DegreePlannerFrontend() {
     setDrawerOpen(false);
   }
 
-  //temp
-  const tasks = useQuery(api.tasks.get);
-
   return (
     <div className="min-h-screen bg-gray-100">
       {/* Top Nav */}
@@ -684,7 +717,24 @@ export default function DegreePlannerFrontend() {
             </div>
 
             <nav className="hidden md:flex items-center gap-4 text-sm">
-              <a className="font-semibold underline underline-offset-8" href="#">Degree Planner</a>
+              <button
+                type="button"
+                onClick={() => setActivePage("dars")}
+                className={classNames(
+                  activePage === "dars" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100"
+                )}
+              >
+                DARS Planner
+              </button>
+              <button
+                type="button"
+                onClick={() => setActivePage("degree")}
+                className={classNames(
+                  activePage === "degree" ? "font-semibold underline underline-offset-8" : "opacity-90 hover:opacity-100"
+                )}
+              >
+                Degree Planner
+              </button>
             </nav>
           </div>
 
@@ -703,52 +753,72 @@ export default function DegreePlannerFrontend() {
       <main className="mx-auto grid w-full grid-cols-1 gap-4 px-6 py-4 lg:grid-cols-[320px_minmax(0,1fr)]">
         {/* Left */}
         <aside className="rounded-lg border bg-white p-4">
-          <div className="flex items-start justify-between">
-            <div>
-              <div className="text-xs text-gray-500">DARS Upload</div>
-              {/* for test */}
-              {tasks?.map(({_id, text }) => <div key={_id}>{text}</div>)}
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-sm font-semibold text-gray-900">{uploadedFile ? "DARS Report" : "No file uploaded"}</span>
-                {uploadedFile && <Badge>PDF</Badge>}
+          {activePage === "dars" ? (
+            <>
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-xs text-gray-500">DARS Upload</div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="text-sm font-semibold text-gray-900">{uploadedFile ? "DARS Report" : "No file uploaded"}</span>
+                    {uploadedFile && <Badge>PDF</Badge>}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="rounded border bg-white px-2 py-1 text-sm hover:bg-gray-50"
+                  onClick={triggerUpload}
+                >
+                  {uploadedFile ? "Replace" : "Upload"}
+                </button>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="application/pdf"
+                  className="hidden"
+                  onChange={(e) => onFileSelected(e.target.files?.[0] ?? null)}
+                />
               </div>
+            </>
+          ) : (
+            <div>
+              <div className="text-xs text-gray-500">Degree Planner</div>
+              <div className="mt-1 text-sm font-semibold text-gray-900">Build a plan manually</div>
+              <div className="mt-2 text-xs text-gray-600">Add courses to any semester using + Add Course.</div>
             </div>
-
-            <button
-              type="button"
-              className="rounded border bg-white px-2 py-1 text-sm hover:bg-gray-50"
-              onClick={triggerUpload}
-            >
-              {uploadedFile ? "Replace" : "Upload"}
-            </button>
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/pdf"
-              className="hidden"
-              onChange={(e) => onFileSelected(e.target.files?.[0] ?? null)}
-            />
-          </div>
+          )}
 
           <div className="mt-4 space-y-2">
             <div className="rounded-lg border bg-gray-50 p-3 text-sm text-gray-700">
               <div className="flex items-center justify-between">
                 <span className="font-medium">Status</span>
-                <Badge>{uploadedFile ? (isParsed ? "Loaded" : "Selected") : "Waiting"}</Badge>
+                <Badge>
+                  {activePage === "dars"
+                    ? uploadedFile
+                      ? isParsed
+                        ? "Loaded"
+                        : "Selected"
+                      : "Waiting"
+                    : "Manual"}
+                </Badge>
               </div>
               <div className="mt-2 text-xs text-gray-600">
-                {uploadedFile ? (
-                  <>
-                    <div className="truncate">
-                      <span className="font-medium">File:</span> {uploadedFile.name}
-                    </div>
-                    <div>
-                      <span className="font-medium">Parsing:</span> {isParsed ? "Populated all years" : "Parsing..."}
-                    </div>
-                  </>
+                {activePage === "dars" ? (
+                  uploadedFile ? (
+                    <>
+                      <div className="truncate">
+                        <span className="font-medium">File:</span> {uploadedFile.name}
+                      </div>
+                      <div>
+                        <span className="font-medium">Parsing:</span> {isParsed ? "Populated all years" : "Parsing..."}
+                      </div>
+                    </>
+                  ) : (
+                    <>Upload a DARS PDF to populate your plan automatically.</>
+                  )
                 ) : (
-                  <>Upload a DARS PDF to populate your plan automatically.</>
+                  <>No upload needed. Use + Add Course in any term.</>
                 )}
               </div>
             </div>
@@ -792,7 +862,9 @@ export default function DegreePlannerFrontend() {
           <div className="space-y-2">
             {plannerYears.length === 0 ? (
               <div className="rounded-lg border bg-white p-4 text-sm text-gray-600">
-                Upload a DARS report to populate your class-year plan.
+                {activePage === "dars"
+                  ? "Upload a DARS report to populate your class-year plan."
+                  : "Switching to Degree Planner will auto-create 4 empty years."}
               </div>
             ) : (
               plannerYears.map((y) => (
@@ -903,9 +975,7 @@ export default function DegreePlannerFrontend() {
                 ))}
 
                 {drawerResults.length === 0 && (
-                  <div className="text-sm text-gray-600">
-                    No results yet. Choose a subject and click Search.
-                  </div>
+                  <div className="text-sm text-gray-600">No results yet. Choose a subject and click Search.</div>
                 )}
               </div>
             </div>
